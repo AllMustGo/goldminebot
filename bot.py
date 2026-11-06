@@ -107,6 +107,18 @@ def sheet_settings():
             host = r.url.split("/")[2] if "://" in r.url else r.url
             print(f"Sheet settings: got a web page instead of settings (HTTP {r.status_code}, from {host}).")
             print("First part of the page:", " ".join(r.text[:200].split()))
+            u = SHEET_URL
+            print("URL check:", {
+                "length": len(u),
+                "starts_ok": u.startswith("https://script.google.com/macros/s/"),
+                "ends_with_exec": u.endswith("/exec"),
+                "has_account_part_/u/": "/u/" in u,
+                "has_workspace_part_/a/": "/a/" in u,
+                "has_dev": u.endswith("/dev"),
+                "has_question_mark": "?" in u,
+                "has_space": " " in os.environ.get("SHEET_WEBHOOK_URL", ""),
+            })
+            print("Redirects:", [f"{h.status_code} {h.url.split('/')[2]}" for h in r.history])
             print("Check: SHEET_WEBHOOK_URL ends in /exec, and the web app access is 'Anyone'.")
             return None
         if "error" in data:
