@@ -101,7 +101,14 @@ def sheet_settings():
         return {"enabled": True, "strategy": DEFAULT_STRATEGY}
     try:
         r = requests.get(SHEET_URL, params={"token": SHEET_TOKEN}, timeout=20)
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:
+            host = r.url.split("/")[2] if "://" in r.url else r.url
+            print(f"Sheet settings: got a web page instead of settings (HTTP {r.status_code}, from {host}).")
+            print("First part of the page:", " ".join(r.text[:200].split()))
+            print("Check: SHEET_WEBHOOK_URL ends in /exec, and the web app access is 'Anyone'.")
+            return None
         if "error" in data:
             print("Sheet settings error:", data["error"])
             return None
@@ -297,7 +304,9 @@ def main():
         sheet_log("ERROR", message="Alpaca account is blocked from trading")
         return
     equity = float(account["equity"])
-    last_equity = float(account["last_equity"])
+    last_equity = float(account.get("last_equity") or 0)
+    if last_equity <= 0:
+        last_equity = equity  # brand-new account has no previous close yet
     day_pnl = equity - last_equity
     print(f"[{MODE}] {now:%H:%M} ET | equity {equity:.2f} | day P&L {day_pnl:+.2f}")
 
