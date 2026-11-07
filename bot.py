@@ -300,14 +300,43 @@ def build_order(sym, strategy, sig, buying_power, now):
     }
 
 
+def health_check():
+    """Manual runs while the market is closed: test every connection without trading."""
+    print("Health check (manual run, market closed):")
+    acct = alpaca("GET", "/v2/account")
+    print(f"  Alpaca: OK ({MODE}, equity {float(acct['equity']):.2f})")
+    settings = sheet_settings()
+    if settings is None:
+        print("  Google Sheet: FAILED (see lines above)")
+    else:
+        print(f"  Google Sheet: OK (trading {'on' if settings['enabled'] else 'off'}, strategy '{settings['strategy']}')")
+        sheet_log("HEALTH_CHECK", message="Manual health check passed")
+
+
 # ---------------- Main ----------------
+def connection_test():
+    """Manual runs (Run workflow button) always test the Sheet link, even when the market is closed."""
+    print(f"[{MODE}] Connection test (manual run)")
+    settings = sheet_settings()
+    if settings is None:
+        print("Sheet connection: FAILED (details above).")
+        return
+    print(f"Sheet connection: OK -> trading {'ON' if settings['enabled'] else 'OFF'}, strategy '{settings['strategy']}'")
+    sheet_log("TEST", message="Connection test from GitHub OK")
+
+
 def main():
     if not ALPACA_KEY or not ALPACA_SECRET:
         sys.exit("Missing ALPACA_KEY or ALPACA_SECRET secret.")
 
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        connection_test()
+
     clock = alpaca("GET", "/v2/clock")
     if not clock.get("is_open"):
         print(f"[{MODE}] Market closed. Nothing to do.")
+        if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+            health_check()
         return
 
     now = datetime.now(ET)
