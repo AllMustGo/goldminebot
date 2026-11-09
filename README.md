@@ -9,8 +9,8 @@ Engines (installed by setup()): alerts every 5 min, recurring buys daily ~10 AM 
 Intel recheck daily. Notifications by email and ntfy phone push (Settings > Notifications).
 App extras: market strip, portfolio breakdown, report card vs. S&P 500, trade journal,
 limit/stop orders, other accounts (e.g. Robinhood) tracking.
-Coming next: AI morning brief, Ask GOLDMINEBOT, earnings calendar, daily scanner,
-backtesting, Coinbase crypto.
+AI: morning brief on weekdays (Settings > Morning brief), Ask tab chat, earnings calendar.
+Coming next: daily scanner, backtesting, Coinbase crypto.
 
 ## Files
 - bot.py, requirements.txt, .github/workflows/trade.yml  -> GitHub repo
@@ -22,7 +22,8 @@ backtesting, Coinbase crypto.
 3. Run setup() once and approve permissions. Open Executions/Logs and copy BOT_TOKEN and DASH_KEY.
 4. Project Settings (gear) > Script properties > add:
    ALPACA_KEY, ALPACA_SECRET, PAPER (true or false, same as GitHub),
-   ANTHROPIC_API_KEY (from console.anthropic.com, for the Intel tab)
+   ANTHROPIC_API_KEY (from console.anthropic.com: Intel, morning brief, Ask tab),
+   FINNHUB_API_KEY (optional, free at finnhub.io: earnings calendar)
 5. Deploy > New deployment > Web app > Execute as: Me, Who has access: Anyone > Deploy.
 6. Your dashboard link = the web app URL + ?key=YOUR_DASH_KEY  (save it in iPhone Notes)
 7. After any code change: Deploy > Manage deployments > edit (pencil) > Version: New version.
