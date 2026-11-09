@@ -10,9 +10,14 @@ Strategies (pick in the Sheet's Settings tab, cell "Strategy"):
 
 Every entry is a BRACKET order: the stop-loss and take-profit sit at Alpaca,
 so they fire instantly even if a GitHub run is late.
+
+The bot only manages its OWN trades (orders tagged orb-, vwap-, momentum-).
+Stocks you buy yourself in the app are never touched, and the bot skips
+any symbol you already hold.
 """
 import os
 import sys
+import time
 import traceback
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -240,22 +245,59 @@ STRATEGIES = {"orb": strat_orb, "vwap": strat_vwap, "momentum": strat_momentum}
 
 
 # ---------------- Orders & risk ----------------
-def close_everything(reason):
-    positions = alpaca("GET", "/v2/positions")
-    orders = alpaca("GET", "/v2/orders", params={"status": "open", "limit": 500})
-    if positions:
-        alpaca("DELETE", "/v2/positions", params={"cancel_orders": "true"})
-    elif orders:
-        alpaca("DELETE", "/v2/orders")
-    if positions or orders:
-        sheet_log("CLOSE_ALL", message=f"{reason}: closed {len(positions)} position(s), canceled open orders")
+BOT_PREFIXES = ("orb-", "vwap-", "momentum-")
+
+
+def is_bot_order(o):
+    return str(o.get("client_order_id") or "").startswith(BOT_PREFIXES)
+
+
+def bot_symbols_today(now):
+    """Symbols the bot bought today (its own trades only)."""
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    orders = alpaca("GET", "/v2/orders", params={"status": "all", "after": start.isoformat(),
+                                                  "limit": 500, "nested": "false"})
+    return {o["symbol"] for o in orders if o.get("side") == "buy" and is_bot_order(o)}
+
+
+def close_bot_positions(reason, now):
+    """Closes only the bot's own trades. Your own investments are never sold here."""
+    syms = bot_symbols_today(now)
+    if not syms:
+        print(f"{reason}: no bot trades open.")
+        return
+    open_orders = alpaca("GET", "/v2/orders", params={"status": "open", "nested": "false", "limit": 500})
+    canceled = 0
+    for o in open_orders:
+        if o["symbol"] in syms:
+            try:
+                alpaca("DELETE", f"/v2/orders/{o['id']}")
+                canceled += 1
+            except Exception as e:
+                print("Cancel failed:", e)
+    if canceled:
+        time.sleep(2)  # let Alpaca release the shares held by stop/target orders
+    positions = [p for p in alpaca("GET", "/v2/positions") if p["symbol"] in syms]
+    closed = []
+    for p in positions:
+        for attempt in range(3):
+            try:
+                alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                closed.append(p["symbol"])
+                break
+            except Exception as e:
+                if attempt == 2:
+                    sheet_log("ERROR", message=f"Could not close {p['symbol']}: {e}")
+                time.sleep(2)
+    if closed or canceled:
+        sheet_log("CLOSE_BOT", message=f"{reason}: closed {', '.join(closed) or 'no positions'}; canceled {canceled} order(s)")
     else:
         print(f"{reason}: nothing open.")
 
 
 def cancel_stale_entries(orders, now):
     for o in orders:
-        if o.get("side") == "buy" and o.get("order_class") == "bracket" and float(o.get("filled_qty") or 0) == 0:
+        if o.get("side") == "buy" and is_bot_order(o) and o.get("order_class") == "bracket" and float(o.get("filled_qty") or 0) == 0:
             stamp = o.get("submitted_at") or o.get("created_at")
             if stamp and parse_time(stamp) < now - timedelta(minutes=STALE_ENTRY_MINUTES):
                 alpaca("DELETE", f"/v2/orders/{o['id']}")
@@ -268,7 +310,7 @@ def entries_today(now):
                                                   "limit": 500, "nested": "false"})
     count = 0
     for o in orders:
-        if o.get("side") != "buy":
+        if o.get("side") != "buy" or not is_bot_order(o):
             continue
         if float(o.get("filled_qty") or 0) > 0 or o.get("status") in ("new", "accepted", "pending_new", "partially_filled"):
             count += 1
@@ -354,14 +396,14 @@ def main():
     # 1) End of day: flatten everything (works on half-days too)
     minutes_to_close = (parse_time(clock["next_close"]) - now).total_seconds() / 60
     if minutes_to_close <= EOD_MINUTES_BEFORE_CLOSE:
-        close_everything("End of day")
+        close_bot_positions("End of day", now)
         sheet_log("DAY_SUMMARY", start_equity=round(last_equity, 2),
                   end_equity=round(equity, 2), day_pnl=round(day_pnl, 2))
         return
 
     # 2) Daily loss limit
     if day_pnl <= -MAX_DAILY_LOSS:
-        close_everything(f"Daily loss limit hit ({day_pnl:+.2f})")
+        close_bot_positions(f"Daily loss limit hit ({day_pnl:+.2f})", now)
         return
 
     # 3) Kill switch / strategy from the Sheet
@@ -370,15 +412,18 @@ def main():
         print("Settings tab unreachable: not opening new trades this run.")
         return
     if not settings["enabled"]:
-        close_everything("Kill switch OFF")
+        close_bot_positions("Kill switch OFF", now)
         return
 
     # 4) Housekeeping and capacity
     orders = alpaca("GET", "/v2/orders", params={"status": "open", "nested": "true", "limit": 500})
     cancel_stale_entries(orders, now)
     positions = alpaca("GET", "/v2/positions")
-    busy = {p["symbol"] for p in positions} | {o["symbol"] for o in orders}
-    slots = min(MAX_OPEN_POSITIONS - len(busy), MAX_TRADES_PER_DAY - entries_today(now))
+    busy = {p["symbol"] for p in positions} | {o["symbol"] for o in orders}  # never trade a symbol you hold
+    bot_today = bot_symbols_today(now)
+    bot_open = {p["symbol"] for p in positions if p["symbol"] in bot_today} | \
+               {o["symbol"] for o in orders if is_bot_order(o)}
+    slots = min(MAX_OPEN_POSITIONS - len(bot_open), MAX_TRADES_PER_DAY - entries_today(now))
     if slots <= 0:
         print("No free slots (max positions or max trades per day reached).")
         return
