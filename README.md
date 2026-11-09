@@ -33,7 +33,8 @@ Repo name: goldminebot. Settings > Secrets and variables > Actions.
 
 Secrets: ALPACA_KEY, ALPACA_SECRET, SHEET_WEBHOOK_URL (web app URL, no ?key), SHEET_TOKEN (= BOT_TOKEN)
 
-Variables (optional except PAPER):
+Variables (optional except PAPER). Anything you set in the app's Settings screen
+(gear icon) overrides these; they're only the fallback:
 | Variable | Default | Meaning |
 |---|---|---|
 | PAPER | true | Exactly `false` = live money |
