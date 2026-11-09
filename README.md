@@ -5,7 +5,12 @@ Phone app: portfolio chart with 1D-ALL ranges (drag to scrub), stocks and watchl
 sparklines, stock pages with chart, stats and news, and Buy/Sell from the app.
 The bot only manages its own trades (tagged orb-/vwap-/momentum-); stocks you buy
 yourself (tagged manual-) are never sold by the bot.
-Coming next: Coinbase crypto, alerts engine, auto-invest engine.
+Engines (installed by setup()): alerts every 5 min, recurring buys daily ~10 AM ET,
+Intel recheck daily. Notifications by email and ntfy phone push (Settings > Notifications).
+App extras: market strip, portfolio breakdown, report card vs. S&P 500, trade journal,
+limit/stop orders, other accounts (e.g. Robinhood) tracking.
+Coming next: AI morning brief, Ask GOLDMINEBOT, earnings calendar, daily scanner,
+backtesting, Coinbase crypto.
 
 ## Files
 - bot.py, requirements.txt, .github/workflows/trade.yml  -> GitHub repo
