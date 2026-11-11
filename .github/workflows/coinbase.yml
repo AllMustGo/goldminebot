@@ -1,0 +1,28 @@
+name: GOLDMINEBOT Coinbase sync
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"   # every 30 minutes, every day (crypto never closes)
+  workflow_dispatch:
+
+concurrency:
+  group: coinbase-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Sync Coinbase balances
+        run: python coinbase_sync.py
+        env:
+          COINBASE_KEY_NAME: ${{ secrets.COINBASE_KEY_NAME }}
+          COINBASE_PRIVATE_KEY: ${{ secrets.COINBASE_PRIVATE_KEY }}
+          SHEET_WEBHOOK_URL: ${{ secrets.SHEET_WEBHOOK_URL }}
+          SHEET_TOKEN: ${{ secrets.SHEET_TOKEN }}
