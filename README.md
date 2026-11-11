@@ -10,10 +10,13 @@ Intel recheck daily. Notifications by email and ntfy phone push (Settings > Noti
 App extras: market strip, portfolio breakdown, report card vs. S&P 500, trade journal,
 limit/stop orders, other accounts (e.g. Robinhood) tracking.
 AI: morning brief on weekdays (Settings > Morning brief), Ask tab chat, earnings calendar.
-Coming next: daily scanner, backtesting, Coinbase crypto.
+Coinbase (view-only): coinbase_sync.py + .github/workflows/coinbase.yml sync balances
+every 30 min into the Holdings tab. GitHub secrets: COINBASE_KEY_NAME, COINBASE_PRIVATE_KEY
+(ECDSA key, View permission only).
+Coming next: daily scanner, backtesting, crypto recurring buys.
 
 ## Files
-- bot.py, requirements.txt, .github/workflows/trade.yml  -> GitHub repo
+- bot.py, coinbase_sync.py, requirements.txt, .github/workflows/trade.yml and coinbase.yml -> GitHub repo
 - apps_script/Code.gs, apps_script/Dashboard.html       -> the Google Sheet's Apps Script
 
 ## 1. Google Sheet + dashboard (use jbensonslist@gmail.com)
