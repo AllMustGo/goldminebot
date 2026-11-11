@@ -13,6 +13,9 @@ AI: morning brief on weekdays (Settings > Morning brief), Ask tab chat, earnings
 Coinbase (view-only): coinbase_sync.py + .github/workflows/coinbase.yml sync balances
 every 30 min into the Holdings tab. GitHub secrets: COINBASE_KEY_NAME, COINBASE_PRIVATE_KEY
 (ECDSA key, View permission only).
+Compare tab: add tickers (app or Sheet column A + Found at in C); company numbers fill daily
+at 6 AM ET from Finnhub. Run styleSheets() once to give the Sheet the app's look (it never runs
+automatically, so your own formatting is safe).
 Coming next: daily scanner, backtesting, crypto recurring buys.
 
 ## Files
