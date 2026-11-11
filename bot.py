@@ -10,14 +10,9 @@ Strategies (pick in the Sheet's Settings tab, cell "Strategy"):
 
 Every entry is a BRACKET order: the stop-loss and take-profit sit at Alpaca,
 so they fire instantly even if a GitHub run is late.
-
-The bot only manages its OWN trades (orders tagged orb-, vwap-, momentum-).
-Stocks you buy yourself in the app are never touched, and the bot skips
-any symbol you already hold.
 """
 import os
 import sys
-import time
 import traceback
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -54,76 +49,7 @@ MOMENTUM_MIN_GAIN_PCT = float(env("MOMENTUM_MIN_GAIN_PCT", "5"))
 MIN_STOP_PCT = 0.002          # stops tighter than 0.2% get widened (avoid noise stop-outs)
 MIN_PRICE, MAX_PRICE = 5.0, 500.0
 STALE_ENTRY_MINUTES = 10      # unfilled entry orders get canceled after this
-EOD_MINUTES_BEFORE_CLOSE = 15 # close bot trades this close to the bell (handles half-days)
-ENTRY_BUFFER_PCT = 0.001      # limit price this far above the last price
-ORB_MINUTES = 15              # opening range length
-ORB_END = dtime(11, 30)
-VWAP_START, VWAP_END = dtime(10, 0), dtime(15, 0)
-VWAP_TREND_SHARE = 0.7        # share of bars that must close above VWAP
-MOMENTUM_START, MOMENTUM_END = dtime(9, 45), dtime(11, 30)
-
-# Settings from the app (Settings tab in the Sheet) override the defaults above.
-# key in Sheet -> (variable, kind)
-SETTING_MAP = {
-    "max_dollars_per_trade": ("MAX_DOLLARS_PER_TRADE", "float"),
-    "max_daily_loss": ("MAX_DAILY_LOSS", "float"),
-    "max_trades_per_day": ("MAX_TRADES_PER_DAY", "int"),
-    "max_open_positions": ("MAX_OPEN_POSITIONS", "int"),
-    "reward_risk": ("REWARD_RISK", "float"),
-    "max_stop_pct": ("MAX_STOP_PCT", "pct"),
-    "min_stop_pct": ("MIN_STOP_PCT", "pct"),
-    "entry_buffer_pct": ("ENTRY_BUFFER_PCT", "pct"),
-    "stale_entry_minutes": ("STALE_ENTRY_MINUTES", "int"),
-    "eod_minutes_before_close": ("EOD_MINUTES_BEFORE_CLOSE", "int"),
-    "orb_minutes": ("ORB_MINUTES", "int"),
-    "orb_end": ("ORB_END", "time"),
-    "vwap_start": ("VWAP_START", "time"),
-    "vwap_end": ("VWAP_END", "time"),
-    "vwap_trend_pct": ("VWAP_TREND_SHARE", "pct"),
-    "momentum_start": ("MOMENTUM_START", "time"),
-    "momentum_end": ("MOMENTUM_END", "time"),
-    "momentum_min_gain_pct": ("MOMENTUM_MIN_GAIN_PCT", "float"),
-    "min_price": ("MIN_PRICE", "float"),
-    "max_price": ("MAX_PRICE", "float"),
-    "bot_watchlist": ("WATCHLIST", "list"),
-}
-
-
-def apply_settings(settings):
-    """Copies app settings onto the bot's variables. Bad values are skipped (defaults stay)."""
-    applied = []
-    for key, (name, kind) in SETTING_MAP.items():
-        raw = settings.get(key)
-        if raw is None or str(raw).strip() == "":
-            continue
-        text = str(raw).strip().replace("$", "").replace(",", "" if kind != "list" else ",").replace("%", "")
-        try:
-            if kind == "float":
-                value = float(text)
-            elif kind == "int":
-                value = int(float(text))
-            elif kind == "pct":
-                value = float(text) / 100
-            elif kind == "time":
-                hh, mm = text.split(":")[:2]
-                value = dtime(int(hh), int(mm))
-            else:
-                value = [x.strip().upper() for x in text.split(",") if x.strip()]
-                if not value:
-                    continue
-        except (ValueError, TypeError):
-            print(f"Setting {key} = {raw!r} isn't valid, keeping the default.")
-            continue
-        globals()[name] = value
-        applied.append(key)
-    return applied
-
-
-def settings_summary():
-    return (f"max ${MAX_DOLLARS_PER_TRADE:g}/trade, daily loss limit ${MAX_DAILY_LOSS:g}, "
-            f"{MAX_TRADES_PER_DAY} trades/day, {MAX_OPEN_POSITIONS} open, target {REWARD_RISK:g}x, "
-            f"stops {MIN_STOP_PCT*100:g}-{MAX_STOP_PCT*100:g}%, prices ${MIN_PRICE:g}-${MAX_PRICE:g}, "
-            f"watchlist {len(WATCHLIST)} stocks")
+EOD_MINUTES_BEFORE_CLOSE = 15 # flatten everything this close to the bell (handles half-days)
 
 TRADE_URL = "https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets"
@@ -175,32 +101,13 @@ def sheet_settings():
         return {"enabled": True, "strategy": DEFAULT_STRATEGY}
     try:
         r = requests.get(SHEET_URL, params={"token": SHEET_TOKEN}, timeout=20)
-        try:
-            data = r.json()
-        except ValueError:
-            host = r.url.split("/")[2] if "://" in r.url else r.url
-            print(f"Sheet settings: got a web page instead of settings (HTTP {r.status_code}, from {host}).")
-            print("First part of the page:", " ".join(r.text[:200].split()))
-            u = SHEET_URL
-            print("URL check:", {
-                "length": len(u),
-                "starts_ok": u.startswith("https://script.google.com/macros/s/"),
-                "ends_with_exec": u.endswith("/exec"),
-                "has_account_part_/u/": "/u/" in u,
-                "has_workspace_part_/a/": "/a/" in u,
-                "has_dev": u.endswith("/dev"),
-                "has_question_mark": "?" in u,
-                "has_space": " " in os.environ.get("SHEET_WEBHOOK_URL", ""),
-            })
-            print("Redirects:", [f"{h.status_code} {h.url.split('/')[2]}" for h in r.history])
-            print("Check: SHEET_WEBHOOK_URL ends in /exec, and the web app access is 'Anyone'.")
-            return None
+        data = r.json()
         if "error" in data:
             print("Sheet settings error:", data["error"])
             return None
-        data["enabled"] = str(data.get("enabled", "")).strip().upper() in ("TRUE", "ON", "YES", "1")
-        data["strategy"] = str(data.get("strategy") or DEFAULT_STRATEGY).strip().lower()
-        return data
+        enabled = str(data.get("enabled", "")).strip().upper() in ("TRUE", "ON", "YES", "1")
+        strategy = str(data.get("strategy") or DEFAULT_STRATEGY).strip().lower()
+        return {"enabled": enabled, "strategy": strategy}
     except Exception as e:
         print("Could not read Sheet settings:", e)
         return None
@@ -266,12 +173,11 @@ def vwap_series(bars):
 
 # ---------------- Strategies (return {"entry","stop","why"} or None) ----------------
 def strat_orb(bars, now):
-    range_end = (datetime.combine(now.date(), dtime(9, 30)) + timedelta(minutes=ORB_MINUTES)).time()
-    if not (range_end <= now.time() <= ORB_END):
+    if not (dtime(9, 45) <= now.time() <= dtime(11, 30)):
         return None
-    opening = [b for b in bars if b["et"].time() < range_end]
-    after = [b for b in bars if b["et"].time() >= range_end]
-    if len(opening) < max(1, ORB_MINUTES // 5) or not after:
+    opening = [b for b in bars if b["et"].time() < dtime(9, 45)]
+    after = [b for b in bars if b["et"].time() >= dtime(9, 45)]
+    if len(opening) < 3 or not after:
         return None
     hi = max(b["h"] for b in opening)
     lo = min(b["l"] for b in opening)
@@ -286,12 +192,12 @@ def strat_orb(bars, now):
 
 
 def strat_vwap(bars, now):
-    if not (VWAP_START <= now.time() <= VWAP_END) or len(bars) < 6:
+    if not (dtime(10, 0) <= now.time() <= dtime(15, 0)) or len(bars) < 6:
         return None
     vw = vwap_series(bars)
     last, v = bars[-1], vw[-1]
     share_above = sum(1 for b, x in zip(bars, vw) if b["c"] > x) / len(bars)
-    if share_above < VWAP_TREND_SHARE:
+    if share_above < 0.7:
         return None  # not a clean uptrend
     if last["l"] <= v * 1.002 and last["c"] > v and last["c"] > last["o"]:
         return {"entry": last["c"], "stop": min(last["l"], v * 0.996),
@@ -300,7 +206,7 @@ def strat_vwap(bars, now):
 
 
 def strat_momentum(bars, now):
-    if not (MOMENTUM_START <= now.time() <= MOMENTUM_END) or len(bars) < 4:
+    if not (dtime(9, 45) <= now.time() <= dtime(11, 30)) or len(bars) < 4:
         return None
     vw = vwap_series(bars)
     last = bars[-1]
@@ -315,59 +221,22 @@ STRATEGIES = {"orb": strat_orb, "vwap": strat_vwap, "momentum": strat_momentum}
 
 
 # ---------------- Orders & risk ----------------
-BOT_PREFIXES = ("orb-", "vwap-", "momentum-")
-
-
-def is_bot_order(o):
-    return str(o.get("client_order_id") or "").startswith(BOT_PREFIXES)
-
-
-def bot_symbols_today(now):
-    """Symbols the bot bought today (its own trades only)."""
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    orders = alpaca("GET", "/v2/orders", params={"status": "all", "after": start.isoformat(),
-                                                  "limit": 500, "nested": "false"})
-    return {o["symbol"] for o in orders if o.get("side") == "buy" and is_bot_order(o)}
-
-
-def close_bot_positions(reason, now):
-    """Closes only the bot's own trades. Your own investments are never sold here."""
-    syms = bot_symbols_today(now)
-    if not syms:
-        print(f"{reason}: no bot trades open.")
-        return
-    open_orders = alpaca("GET", "/v2/orders", params={"status": "open", "nested": "false", "limit": 500})
-    canceled = 0
-    for o in open_orders:
-        if o["symbol"] in syms:
-            try:
-                alpaca("DELETE", f"/v2/orders/{o['id']}")
-                canceled += 1
-            except Exception as e:
-                print("Cancel failed:", e)
-    if canceled:
-        time.sleep(2)  # let Alpaca release the shares held by stop/target orders
-    positions = [p for p in alpaca("GET", "/v2/positions") if p["symbol"] in syms]
-    closed = []
-    for p in positions:
-        for attempt in range(3):
-            try:
-                alpaca("DELETE", f"/v2/positions/{p['symbol']}")
-                closed.append(p["symbol"])
-                break
-            except Exception as e:
-                if attempt == 2:
-                    sheet_log("ERROR", message=f"Could not close {p['symbol']}: {e}")
-                time.sleep(2)
-    if closed or canceled:
-        sheet_log("CLOSE_BOT", message=f"{reason}: closed {', '.join(closed) or 'no positions'}; canceled {canceled} order(s)")
+def close_everything(reason):
+    positions = alpaca("GET", "/v2/positions")
+    orders = alpaca("GET", "/v2/orders", params={"status": "open", "limit": 500})
+    if positions:
+        alpaca("DELETE", "/v2/positions", params={"cancel_orders": "true"})
+    elif orders:
+        alpaca("DELETE", "/v2/orders")
+    if positions or orders:
+        sheet_log("CLOSE_ALL", message=f"{reason}: closed {len(positions)} position(s), canceled open orders")
     else:
         print(f"{reason}: nothing open.")
 
 
 def cancel_stale_entries(orders, now):
     for o in orders:
-        if o.get("side") == "buy" and is_bot_order(o) and o.get("order_class") == "bracket" and float(o.get("filled_qty") or 0) == 0:
+        if o.get("side") == "buy" and o.get("order_class") == "bracket" and float(o.get("filled_qty") or 0) == 0:
             stamp = o.get("submitted_at") or o.get("created_at")
             if stamp and parse_time(stamp) < now - timedelta(minutes=STALE_ENTRY_MINUTES):
                 alpaca("DELETE", f"/v2/orders/{o['id']}")
@@ -380,7 +249,7 @@ def entries_today(now):
                                                   "limit": 500, "nested": "false"})
     count = 0
     for o in orders:
-        if o.get("side") != "buy" or not is_bot_order(o):
+        if o.get("side") != "buy":
             continue
         if float(o.get("filled_qty") or 0) > 0 or o.get("status") in ("new", "accepted", "pending_new", "partially_filled"):
             count += 1
@@ -397,7 +266,7 @@ def build_order(sym, strategy, sig, buying_power, now):
     if risk / entry < MIN_STOP_PCT:
         stop = entry * (1 - MIN_STOP_PCT)
         risk = entry - stop
-    limit = round(entry * (1 + ENTRY_BUFFER_PCT), 2)
+    limit = round(entry * 1.001, 2)
     stop = round(stop, 2)
     target = round(limit + risk * REWARD_RISK, 2)
     qty = int(min(MAX_DOLLARS_PER_TRADE, buying_power * 0.95) // limit)
@@ -412,21 +281,6 @@ def build_order(sym, strategy, sig, buying_power, now):
     }
 
 
-def health_check():
-    """Manual runs while the market is closed: test every connection without trading."""
-    print("Health check (manual run, market closed):")
-    acct = alpaca("GET", "/v2/account")
-    print(f"  Alpaca: OK ({MODE}, equity {float(acct['equity']):.2f})")
-    settings = sheet_settings()
-    if settings is None:
-        print("  Google Sheet: FAILED (see lines above)")
-    else:
-        apply_settings(settings)
-        print(f"  Google Sheet: OK (trading {'on' if settings['enabled'] else 'off'}, strategy '{settings['strategy']}')")
-        print(f"  Settings in use: {settings_summary()}")
-        sheet_log("HEALTH_CHECK", message="Manual health check passed. " + settings_summary())
-
-
 # ---------------- Main ----------------
 def main():
     if not ALPACA_KEY or not ALPACA_SECRET:
@@ -435,8 +289,6 @@ def main():
     clock = alpaca("GET", "/v2/clock")
     if not clock.get("is_open"):
         print(f"[{MODE}] Market closed. Nothing to do.")
-        if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-            health_check()
         return
 
     now = datetime.now(ET)
@@ -445,46 +297,38 @@ def main():
         sheet_log("ERROR", message="Alpaca account is blocked from trading")
         return
     equity = float(account["equity"])
-    last_equity = float(account.get("last_equity") or 0)
-    if last_equity <= 0:
-        last_equity = equity  # brand-new account has no previous close yet
+    last_equity = float(account["last_equity"])
     day_pnl = equity - last_equity
     print(f"[{MODE}] {now:%H:%M} ET | equity {equity:.2f} | day P&L {day_pnl:+.2f}")
 
     # 1) End of day: flatten everything (works on half-days too)
-    settings = sheet_settings()
-    if settings is not None:
-        apply_settings(settings)
-
     minutes_to_close = (parse_time(clock["next_close"]) - now).total_seconds() / 60
     if minutes_to_close <= EOD_MINUTES_BEFORE_CLOSE:
-        close_bot_positions("End of day", now)
+        close_everything("End of day")
         sheet_log("DAY_SUMMARY", start_equity=round(last_equity, 2),
                   end_equity=round(equity, 2), day_pnl=round(day_pnl, 2))
         return
 
     # 2) Daily loss limit
     if day_pnl <= -MAX_DAILY_LOSS:
-        close_bot_positions(f"Daily loss limit hit ({day_pnl:+.2f})", now)
+        close_everything(f"Daily loss limit hit ({day_pnl:+.2f})")
         return
 
     # 3) Kill switch / strategy from the Sheet
+    settings = sheet_settings()
     if settings is None:
         print("Settings tab unreachable: not opening new trades this run.")
         return
     if not settings["enabled"]:
-        close_bot_positions("Kill switch OFF", now)
+        close_everything("Kill switch OFF")
         return
 
     # 4) Housekeeping and capacity
     orders = alpaca("GET", "/v2/orders", params={"status": "open", "nested": "true", "limit": 500})
     cancel_stale_entries(orders, now)
     positions = alpaca("GET", "/v2/positions")
-    busy = {p["symbol"] for p in positions} | {o["symbol"] for o in orders}  # never trade a symbol you hold
-    bot_today = bot_symbols_today(now)
-    bot_open = {p["symbol"] for p in positions if p["symbol"] in bot_today} | \
-               {o["symbol"] for o in orders if is_bot_order(o)}
-    slots = min(MAX_OPEN_POSITIONS - len(bot_open), MAX_TRADES_PER_DAY - entries_today(now))
+    busy = {p["symbol"] for p in positions} | {o["symbol"] for o in orders}
+    slots = min(MAX_OPEN_POSITIONS - len(busy), MAX_TRADES_PER_DAY - entries_today(now))
     if slots <= 0:
         print("No free slots (max positions or max trades per day reached).")
         return
