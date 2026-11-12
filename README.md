@@ -16,6 +16,9 @@ every 30 min into the Holdings tab. GitHub secrets: COINBASE_KEY_NAME, COINBASE_
 Compare tab: add tickers (app or Sheet column A + Found at in C); company numbers fill daily
 at 6 AM ET from Finnhub. Run styleSheets() once to give the Sheet the app's look (it never runs
 automatically, so your own formatting is safe).
+Market data extras: today's movers, holiday/early-close notices, upcoming IPOs, dividends,
+bid/ask spread warnings, and per-company analyst ratings, earnings beat/miss, insider trades,
+peers, beta, dividend yield, ROE, debt/equity and 52-week position (Finnhub free plan).
 Coming next: daily scanner, backtesting, crypto recurring buys.
 
 ## Files
