@@ -15,24 +15,56 @@ import secrets
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import base64
+
 import jwt
 import requests
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
 HOST = "api.coinbase.com"
 ET = ZoneInfo("America/New_York")
 KEY_NAME = (os.environ.get("COINBASE_KEY_NAME") or "").strip()
-KEY_SECRET = (os.environ.get("COINBASE_PRIVATE_KEY") or "").strip().replace("\\n", "\n")
+KEY_SECRET = (os.environ.get("COINBASE_PRIVATE_KEY") or "").strip().strip('"').strip("'").replace("\\n", "\n").strip()
 SHEET_URL = (os.environ.get("SHEET_WEBHOOK_URL") or "").strip()
 SHEET_TOKEN = (os.environ.get("SHEET_TOKEN") or "").strip()
 STABLE = {"USD", "USDC", "USDT", "DAI", "PYUSD"}
 
 
+def load_key():
+    """Accepts an ECDSA key (PEM block) or an Ed25519 key (base64 string), as Coinbase gives them."""
+    if "BEGIN" in KEY_SECRET:
+        key = serialization.load_pem_private_key(KEY_SECRET.encode(), password=None)
+    else:
+        raw = base64.b64decode("".join(KEY_SECRET.split()))
+        if len(raw) in (32, 64):
+            key = ed25519.Ed25519PrivateKey.from_private_bytes(raw[:32])
+        else:
+            key = serialization.load_der_private_key(raw, password=None)
+    if isinstance(key, ec.EllipticCurvePrivateKey):
+        return key, "ES256"
+    if isinstance(key, ed25519.Ed25519PrivateKey):
+        return key, "EdDSA"
+    raise RuntimeError("Unsupported key type. Create the key with ECDSA or Ed25519.")
+
+
+def describe_secrets():
+    """Explains what's wrong with the secrets without printing them."""
+    name, sec = KEY_NAME, KEY_SECRET
+    print("Key name: ", "MISSING" if not name else
+          f"present, {len(name)} characters, " + ("starts with organizations/" if name.startswith("organizations/") else "an ID (no organizations/ prefix)"))
+    if not sec:
+        print("Private key: MISSING (check the secret is named exactly COINBASE_PRIVATE_KEY)")
+    else:
+        kind = "PEM block (ECDSA)" if "BEGIN" in sec else "single-line text (looks like Ed25519 / base64)"
+        print(f"Private key: present, {len(sec)} characters, {kind}")
+
+
 def build_jwt(method, path):
-    key = serialization.load_pem_private_key(KEY_SECRET.encode(), password=None)
+    key, alg = load_key()
     now = int(time.time())
     payload = {"sub": KEY_NAME, "iss": "cdp", "nbf": now, "exp": now + 120, "uri": f"{method} {HOST}{path}"}
-    return jwt.encode(payload, key, algorithm="ES256", headers={"kid": KEY_NAME, "nonce": secrets.token_hex()})
+    return jwt.encode(payload, key, algorithm=alg, headers={"kid": KEY_NAME, "nonce": secrets.token_hex()})
 
 
 def coinbase(path, params=None):
@@ -40,7 +72,7 @@ def coinbase(path, params=None):
     r = requests.get(f"https://{HOST}{path}", params=params, headers={"Authorization": f"Bearer {token}"}, timeout=20)
     if r.status_code == 401:
         raise RuntimeError("Coinbase rejected the key (401). Check COINBASE_KEY_NAME and COINBASE_PRIVATE_KEY, "
-                           "and that the key was created with the ECDSA signature algorithm and View permission.")
+                           "and that the key has the View permission.")
     if r.status_code >= 400:
         raise RuntimeError(f"Coinbase {path} failed ({r.status_code}): {r.text[:200]}")
     return r.json()
@@ -70,9 +102,13 @@ def send(kind, **data):
 
 
 def main():
-    if not KEY_NAME or "BEGIN" not in KEY_SECRET:
-        sys.exit("Missing COINBASE_KEY_NAME or COINBASE_PRIVATE_KEY secret (the private key must be the full "
-                 "-----BEGIN EC PRIVATE KEY----- block).")
+    describe_secrets()
+    if not KEY_NAME or not KEY_SECRET:
+        sys.exit("Add both GitHub secrets, named exactly COINBASE_KEY_NAME and COINBASE_PRIVATE_KEY.")
+    try:
+        load_key()
+    except Exception as e:
+        sys.exit(f"The private key couldn't be read ({type(e).__name__}). Re-copy it from Coinbase: the whole key, nothing extra.")
     balances, cursor = {}, None
     for _ in range(10):
         params = {"limit": 250}
