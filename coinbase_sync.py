@@ -93,12 +93,29 @@ def price(currency):
 def send(kind, **data):
     print(kind, {k: v for k, v in data.items() if k != "items"})
     if not SHEET_URL:
+        print("Sheet: SHEET_WEBHOOK_URL secret is missing.")
         return
     try:
-        requests.post(SHEET_URL, json={"token": SHEET_TOKEN, "kind": kind,
-                                       "time": datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S"), **data}, timeout=30)
+        r = requests.post(SHEET_URL, json={"token": SHEET_TOKEN, "kind": kind,
+                                           "time": datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S"), **data}, timeout=30)
     except Exception as e:
         print("Sheet update failed:", e)
+        return
+    host = r.url.split("/")[2] if "://" in r.url else r.url
+    body = " ".join(r.text[:160].split())
+    print(f"Sheet answered: HTTP {r.status_code} from {host}: {body}")
+    if '"ok":true' in r.text.replace(" ", ""):
+        print("Sheet: OK, holdings saved.")
+    elif "unauthorized" in r.text:
+        print("Sheet: the link works but the password doesn't match. Set the SHEET_TOKEN secret to the BOT_TOKEN "
+              "from Apps Script > Project Settings > Script properties.")
+    elif "accounts.google.com" in host or "<html" in r.text[:200].lower():
+        u = SHEET_URL
+        print("Sheet: got a web page instead of an answer. URL check:", {
+            "length": len(u), "starts_ok": u.startswith("https://script.google.com/macros/s/"),
+            "ends_with_exec": u.endswith("/exec"), "has_/u/": "/u/" in u, "has_/a/": "/a/" in u,
+            "has_question_mark": "?" in u, "has_space": " " in os.environ.get("SHEET_WEBHOOK_URL", "")})
+        print("Fix: copy the Web app URL from Deploy > Manage deployments (access: Anyone) into SHEET_WEBHOOK_URL.")
 
 
 def main():
