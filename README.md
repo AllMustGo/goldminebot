@@ -23,6 +23,9 @@ Self-improvement: daily self-check at 6:30 AM ET (fixes missing schedules, flags
 Alpaca, Coinbase, Compare and error problems; notifies only when needed) and a weekly AI
 improvement report on Saturdays at 9 AM ET with setting suggestions you Approve or Dismiss
 in the app (More > Health & improvements). Nothing changes without your approval.
+IPO Watch (More > IPO Watch): track private companies; checked daily ~7:15 AM ET against the
+Finnhub IPO calendar, SEC S-1/F-1 filings and listings worldwide; notifies on status changes.
+Search accepts company names and explains foreign-only listings.
 Coming next: daily scanner, backtesting, crypto recurring buys.
 
 ## Files
