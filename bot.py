@@ -54,7 +54,7 @@ MOMENTUM_MIN_GAIN_PCT = float(env("MOMENTUM_MIN_GAIN_PCT", "5"))
 MIN_STOP_PCT = 0.002          # stops tighter than 0.2% get widened (avoid noise stop-outs)
 MIN_PRICE, MAX_PRICE = 5.0, 500.0
 STALE_ENTRY_MINUTES = 10      # unfilled entry orders get canceled after this
-EOD_MINUTES_BEFORE_CLOSE = 15 # close bot trades this close to the bell (handles half-days)
+EOD_MINUTES_BEFORE_CLOSE = 25 # close bot trades this close to the bell (handles half-days; extra room for late GitHub runs)
 ENTRY_BUFFER_PCT = 0.001      # limit price this far above the last price
 ORB_MINUTES = 15              # opening range length
 ORB_END = dtime(11, 30)
@@ -322,17 +322,37 @@ def is_bot_order(o):
     return str(o.get("client_order_id") or "").startswith(BOT_PREFIXES)
 
 
-def bot_symbols_today(now):
-    """Symbols the bot bought today (its own trades only)."""
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+def bot_buys(now, days=0):
+    """Bot buy orders since midnight `days` days ago, newest first (its own trades only)."""
+    start = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
     orders = alpaca("GET", "/v2/orders", params={"status": "all", "after": start.isoformat(),
-                                                  "limit": 500, "nested": "false"})
-    return {o["symbol"] for o in orders if o.get("side") == "buy" and is_bot_order(o)}
+                                                  "limit": 500, "nested": "false", "direction": "desc"})
+    return [o for o in orders if o.get("side") == "buy" and is_bot_order(o)]
 
 
-def close_bot_positions(reason, now):
-    """Closes only the bot's own trades. Your own investments are never sold here."""
-    syms = bot_symbols_today(now)
+def bot_symbols_today(now):
+    """Symbols the bot bought today."""
+    return {o["symbol"] for o in bot_buys(now, 0)}
+
+
+def bot_symbols_recent(now, days=14):
+    """Symbols the bot bought in the last two weeks, so positions it forgot to close are still recognized."""
+    return {o["symbol"] for o in bot_buys(now, days)}
+
+
+def close_leftovers(now):
+    """A day-trading bot holds nothing overnight. Sells any bot position bought on an earlier day."""
+    today_syms = bot_symbols_today(now)
+    recent = bot_symbols_recent(now)
+    held = {p["symbol"] for p in alpaca("GET", "/v2/positions")}
+    leftover = (recent - today_syms) & held
+    if leftover:
+        close_bot_positions("Leftover from a previous day (" + ", ".join(sorted(leftover)) + ")", now, only=leftover)
+
+
+def close_bot_positions(reason, now, only=None):
+    """Closes only the bot's own trades (from the last two weeks). Your own investments are never sold here."""
+    syms = only if only is not None else bot_symbols_recent(now)
     if not syms:
         print(f"{reason}: no bot trades open.")
         return
@@ -374,6 +394,26 @@ def cancel_stale_entries(orders, now):
                 sheet_log("CANCEL_STALE", message=f"{o['symbol']} entry not filled in {STALE_ENTRY_MINUTES} min, canceled")
 
 
+def bot_day_pnl(now):
+    """Today's profit/loss from the bot's own trades only. Your own stocks don't count toward the bot's limit."""
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = alpaca("GET", "/v2/orders", params={"status": "all", "after": start.isoformat(), "limit": 500, "nested": "false"})
+    bot_today = {o["symbol"] for o in today if o.get("side") == "buy" and is_bot_order(o)}
+    recent = bot_symbols_recent(now)
+    positions = {p["symbol"]: p for p in alpaca("GET", "/v2/positions")}
+    filled = lambda o: float(o.get("filled_qty") or 0) * float(o.get("filled_avg_price") or 0)
+    pnl = 0.0
+    for sym in bot_today:
+        pnl -= sum(filled(o) for o in today if o["symbol"] == sym and o.get("side") == "buy" and is_bot_order(o))
+        pnl += sum(filled(o) for o in today if o["symbol"] == sym and o.get("side") == "sell")
+        if sym in positions:
+            pnl += float(positions[sym].get("market_value") or 0)
+    for sym in (recent - bot_today):  # bot positions carried from an earlier day
+        if sym in positions:
+            pnl += float(positions[sym].get("unrealized_intraday_pl") or 0)
+    return pnl
+
+
 def entries_today(now):
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     orders = alpaca("GET", "/v2/orders", params={"status": "all", "after": start.isoformat(),
@@ -405,7 +445,7 @@ def build_order(sym, strategy, sig, buying_power, now):
         return None
     return {
         "symbol": sym, "qty": str(qty), "side": "buy", "type": "limit",
-        "limit_price": f"{limit:.2f}", "time_in_force": "day", "order_class": "bracket",
+        "limit_price": f"{limit:.2f}", "time_in_force": "gtc", "order_class": "bracket",
         "take_profit": {"limit_price": f"{target:.2f}"},
         "stop_loss": {"stop_price": f"{stop:.2f}"},
         "client_order_id": f"{strategy}-{sym}-{now:%Y%m%d%H%M%S}",
@@ -463,9 +503,14 @@ def main():
                   end_equity=round(equity, 2), day_pnl=round(day_pnl, 2))
         return
 
+    # 1b) Nothing is held overnight: sell bot positions left over from an earlier day
+    close_leftovers(now)
+
     # 2) Daily loss limit
-    if day_pnl <= -MAX_DAILY_LOSS:
-        close_bot_positions(f"Daily loss limit hit ({day_pnl:+.2f})", now)
+    bot_pnl = bot_day_pnl(now)
+    print(f"Bot's own P&L today: {bot_pnl:+.2f} (limit -{MAX_DAILY_LOSS:g})")
+    if bot_pnl <= -MAX_DAILY_LOSS:
+        close_bot_positions(f"Daily loss limit hit (bot trades {bot_pnl:+.2f})", now)
         return
 
     # 3) Kill switch / strategy from the Sheet
@@ -481,8 +526,8 @@ def main():
     cancel_stale_entries(orders, now)
     positions = alpaca("GET", "/v2/positions")
     busy = {p["symbol"] for p in positions} | {o["symbol"] for o in orders}  # never trade a symbol you hold
-    bot_today = bot_symbols_today(now)
-    bot_open = {p["symbol"] for p in positions if p["symbol"] in bot_today} | \
+    bot_recent = bot_symbols_recent(now)
+    bot_open = {p["symbol"] for p in positions if p["symbol"] in bot_recent} | \
                {o["symbol"] for o in orders if is_bot_order(o)}
     slots = min(MAX_OPEN_POSITIONS - len(bot_open), MAX_TRADES_PER_DAY - entries_today(now))
     if slots <= 0:
