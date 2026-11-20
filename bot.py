@@ -61,6 +61,9 @@ ORB_END = dtime(11, 30)
 VWAP_START, VWAP_END = dtime(10, 0), dtime(15, 0)
 VWAP_TREND_SHARE = 0.7        # share of bars that must close above VWAP
 MOMENTUM_START, MOMENTUM_END = dtime(9, 45), dtime(11, 30)
+TRADING_STYLE = "normal"      # "aggressive" = more setups, more stocks, more trades (paper money only)
+TRADE_GOLD = "yes"            # also day-trade gold: GLD, SLV, GDX, NEM
+GOLD_SYMBOLS = ["GLD", "SLV", "GDX", "NEM"]
 
 # Settings from the app (Settings tab in the Sheet) override the defaults above.
 # key in Sheet -> (variable, kind)
@@ -86,7 +89,14 @@ SETTING_MAP = {
     "min_price": ("MIN_PRICE", "float"),
     "max_price": ("MAX_PRICE", "float"),
     "bot_watchlist": ("WATCHLIST", "list"),
+    "trading_style": ("TRADING_STYLE", "word"),
+    "trade_gold": ("TRADE_GOLD", "word"),
 }
+
+
+def aggressive():
+    """Aggressive style only ever runs on paper money."""
+    return PAPER and TRADING_STYLE == "aggressive"
 
 
 def apply_settings(settings):
@@ -107,6 +117,8 @@ def apply_settings(settings):
             elif kind == "time":
                 hh, mm = text.split(":")[:2]
                 value = dtime(int(hh), int(mm))
+            elif kind == "word":
+                value = text.lower()
             else:
                 value = [x.strip().upper() for x in text.split(",") if x.strip()]
                 if not value:
@@ -120,10 +132,11 @@ def apply_settings(settings):
 
 
 def settings_summary():
-    return (f"max ${MAX_DOLLARS_PER_TRADE:g}/trade, daily loss limit ${MAX_DAILY_LOSS:g}, "
+    style = "AGGRESSIVE" if aggressive() else "normal"
+    return (f"style {style}, max ${MAX_DOLLARS_PER_TRADE:g}/trade, daily loss limit ${MAX_DAILY_LOSS:g}, "
             f"{MAX_TRADES_PER_DAY} trades/day, {MAX_OPEN_POSITIONS} open, target {REWARD_RISK:g}x, "
             f"stops {MIN_STOP_PCT*100:g}-{MAX_STOP_PCT*100:g}%, prices ${MIN_PRICE:g}-${MAX_PRICE:g}, "
-            f"watchlist {len(WATCHLIST)} stocks")
+            f"watchlist {len(WATCHLIST)} stocks{' + gold' if TRADE_GOLD == 'yes' else ''}")
 
 TRADE_URL = "https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets"
@@ -239,7 +252,8 @@ def get_today_bars(symbols, now):
 
 def get_top_gainers():
     try:
-        data = alpaca("GET", "/v1beta1/screener/stocks/movers", base=DATA_URL, params={"top": 20})
+        data = alpaca("GET", "/v1beta1/screener/stocks/movers", base=DATA_URL,
+                      params={"top": 50 if aggressive() else 20})
     except Exception as e:
         print("Top gainers lookup failed:", e)
         return []
@@ -250,7 +264,7 @@ def get_top_gainers():
         pct = float(g.get("percent_change") or 0)
         if sym.isalpha() and MIN_PRICE <= price <= MAX_PRICE and pct >= MOMENTUM_MIN_GAIN_PCT:
             out.append(sym)
-    return out[:10]
+    return out[:20 if aggressive() else 10]
 
 
 def vwap_series(bars):
@@ -291,6 +305,13 @@ def strat_vwap(bars, now):
     vw = vwap_series(bars)
     last, v = bars[-1], vw[-1]
     share_above = sum(1 for b, x in zip(bars, vw) if b["c"] > x) / len(bars)
+    if aggressive():
+        # Extra setup: price was below VWAP and just took it back with volume (a "VWAP reclaim").
+        prev = bars[-2]
+        avg_vol = sum(b["v"] for b in bars[:-1]) / max(1, len(bars) - 1)
+        if prev["c"] < vw[-2] and last["c"] > v and last["c"] > last["o"] and last["v"] >= avg_vol:
+            return {"entry": last["c"], "stop": min(b["l"] for b in bars[-3:]),
+                    "why": f"Reclaimed VWAP {v:.2f} on above-avg volume"}
     if share_above < VWAP_TREND_SHARE:
         return None  # not a clean uptrend
     if last["l"] <= v * 1.002 and last["c"] > v and last["c"] > last["o"]:
@@ -307,7 +328,7 @@ def strat_momentum(bars, now):
     prior_high = max(b["h"] for b in bars[:-1])
     if last["c"] > prior_high and last["c"] > vw[-1] and last["c"] > last["o"]:
         return {"entry": last["c"], "stop": last["l"],
-                "why": f"Top gainer making new high of day above {prior_high:.2f}"}
+                "why": f"Making a new high of day above {prior_high:.2f}"}
     return None
 
 
@@ -520,6 +541,10 @@ def main():
     if not settings["enabled"]:
         close_bot_positions("Kill switch OFF", now)
         return
+    if not PAPER and TRADING_STYLE == "aggressive":
+        sheet_log("ERROR", message="Aggressive style is for paper money only. Switch Settings > Trading style to Normal before trading live.")
+        return
+    print("Settings in use:", settings_summary())
 
     # 4) Housekeeping and capacity
     orders = alpaca("GET", "/v2/orders", params={"status": "open", "nested": "true", "limit": 500})
@@ -539,13 +564,19 @@ def main():
     if not active:
         sheet_log("ERROR", message=f"Unknown strategy setting '{settings['strategy']}'. Use orb, vwap, momentum or all.")
         return
-    watch = set(WATCHLIST) if ("orb" in active or "vwap" in active) else set()
+    watch = set(WATCHLIST) | (set(GOLD_SYMBOLS) if TRADE_GOLD == "yes" else set())
+    if not ("orb" in active or "vwap" in active or aggressive()):
+        watch = set()
     gainers = get_top_gainers() if "momentum" in active else []
     bars = get_today_bars(watch | set(gainers), now)
 
     candidates, seen = [], set()
     for name in active:
-        symbols = gainers if name == "momentum" else sorted(watch)
+        if name == "momentum":
+            # Aggressive: momentum also scans your bot watchlist, not just today's top gainers.
+            symbols = list(dict.fromkeys(gainers + (sorted(watch) if aggressive() else [])))
+        else:
+            symbols = sorted(watch)
         for sym in symbols:
             if sym in busy or sym in seen or not bars.get(sym):
                 continue
