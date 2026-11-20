@@ -105,3 +105,13 @@ Every trade is labeled with the active model (Trades tab, column "Model"), and "
 If the weekly self-improvement or you change a setting, the active model shows "tuned" and lists what changed;
 "Reset to …" puts the model's settings back. Your $ per trade and loss limit are never lowered by a model.
 Settings › Trading style is a shortcut: Aggressive = Aggressive model, Normal = Careful model.
+
+## Live screen (bottom bar; Ask moved to More)
+Watch the bots work: a live strip (bot P&L today, open, trades used, won/lost, loss limit, market countdown),
+a 5-stage pipeline (Scanning › Almost a signal › Order placed › In trade › Closed today) and a live feed of every
+buy, sell, order, skipped signal (with the reason) and status change. Refreshes every 20 seconds while open.
+How: bot.py sends a SCAN report at the end of every run (what it scanned, near misses within 0.6%, skips and why);
+the crypto bot does the same. Only the latest scan + a 40-item rolling feed are kept (Script properties, not rows),
+so the Sheet doesn't grow. If the stock bot hasn't run for 20+ minutes during market hours, Live shows a warning.
+Trading › Bot trading is now the review screen (today, scoreboard, finished trades, setups); open trades and
+today's moves live on the Live screen.
