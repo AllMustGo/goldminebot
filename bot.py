@@ -449,12 +449,15 @@ def entries_today(now):
 
 
 def build_order(sym, strategy, sig, buying_power, now):
+    """Returns (order, None) or (None, why it was skipped)."""
     entry, stop = float(sig["entry"]), float(sig["stop"])
     if not (MIN_PRICE <= entry <= MAX_PRICE):
-        return None
+        return None, f"price ${entry:.2f} is outside ${MIN_PRICE:g}-${MAX_PRICE:g}"
     risk = entry - stop
-    if risk <= 0 or risk / entry > MAX_STOP_PCT:
-        return None
+    if risk <= 0:
+        return None, "no room for a stop-loss"
+    if risk / entry > MAX_STOP_PCT:
+        return None, f"stop-loss would be {risk / entry * 100:.1f}% away (max {MAX_STOP_PCT * 100:g}%)"
     if risk / entry < MIN_STOP_PCT:
         stop = entry * (1 - MIN_STOP_PCT)
         risk = entry - stop
@@ -463,14 +466,66 @@ def build_order(sym, strategy, sig, buying_power, now):
     target = round(limit + risk * REWARD_RISK, 2)
     qty = int(min(MAX_DOLLARS_PER_TRADE, buying_power * 0.95) // limit)
     if qty < 1:
-        return None
+        return None, f"${min(MAX_DOLLARS_PER_TRADE, buying_power * 0.95):,.0f} buys less than 1 share at ${limit:.2f}"
     return {
         "symbol": sym, "qty": str(qty), "side": "buy", "type": "limit",
         "limit_price": f"{limit:.2f}", "time_in_force": "gtc", "order_class": "bracket",
         "take_profit": {"limit_price": f"{target:.2f}"},
         "stop_loss": {"stop_price": f"{stop:.2f}"},
         "client_order_id": f"{strategy}-{sym}-{now:%Y%m%d%H%M%S}",
-    }
+    }, None
+
+
+# ---------------- Live pipeline report (what the bot saw on this run) ----------------
+SCAN = {"ran": False, "status": "", "scanned": 0, "gainers": 0, "strategies": [], "near": [],
+        "skips": [], "placed": [], "slots": None, "open": 0, "max_open": 0, "used": 0, "max_trades": 0, "bot_pnl": 0.0}
+NEAR_PCT = 0.006  # "almost a signal" = within 0.6% of triggering
+
+
+def near_miss(name, bars, now):
+    """How close a stock is to triggering a setup: (distance 0-1, plain-language text) or None."""
+    if len(bars) < 4:
+        return None
+    last = bars[-1]
+    vw = vwap_series(bars)
+    t = now.time()
+    if name == "orb":
+        range_end = (datetime.combine(now.date(), dtime(9, 30)) + timedelta(minutes=ORB_MINUTES)).time()
+        if not (range_end <= t <= ORB_END):
+            return None
+        opening = [b for b in bars if b["et"].time() < range_end]
+        after = [b for b in bars if b["et"].time() >= range_end]
+        if not opening or not after or any(b["c"] > max(x["h"] for x in opening) for b in after):
+            return None
+        hi = max(b["h"] for b in opening)
+        d = (hi - last["c"]) / hi
+        if 0 <= d <= NEAR_PCT:
+            return d, f"{d * 100:.1f}% below its opening-range high ${hi:.2f}"
+    elif name == "momentum":
+        if not (MOMENTUM_START <= t <= MOMENTUM_END):
+            return None
+        hi = max(b["h"] for b in bars[:-1])
+        d = (hi - last["c"]) / hi
+        if 0 <= d <= NEAR_PCT and last["c"] > vw[-1]:
+            return d, f"{d * 100:.1f}% below today's high ${hi:.2f}, above VWAP"
+    elif name == "vwap":
+        if not (VWAP_START <= t <= VWAP_END) or len(bars) < 6:
+            return None
+        share = sum(1 for b, x in zip(bars, vw) if b["c"] > x) / len(bars)
+        d = (last["c"] - vw[-1]) / vw[-1]
+        if share >= VWAP_TREND_SHARE and 0 < d <= NEAR_PCT:
+            return d, f"in an uptrend, {d * 100:.1f}% above VWAP ${vw[-1]:.2f}: waiting for a dip and bounce"
+    return None
+
+
+def send_scan():
+    if not SCAN["ran"]:
+        return
+    data = dict(SCAN)
+    data.pop("ran")
+    data["near"] = sorted(data["near"], key=lambda x: x["pct"])[:8]
+    data["skips"] = data["skips"][:12]
+    sheet_log("SCAN", **data)
 
 
 def health_check():
@@ -501,6 +556,7 @@ def main():
         return
 
     now = datetime.now(ET)
+    SCAN["ran"] = True
     account = alpaca("GET", "/v2/account")
     if account.get("trading_blocked") or account.get("account_blocked"):
         sheet_log("ERROR", message="Alpaca account is blocked from trading")
@@ -519,6 +575,7 @@ def main():
 
     minutes_to_close = (parse_time(clock["next_close"]) - now).total_seconds() / 60
     if minutes_to_close <= EOD_MINUTES_BEFORE_CLOSE:
+        SCAN["status"] = "End of day: the bot sold its stock trades and stops until tomorrow"
         close_bot_positions("End of day", now)
         sheet_log("DAY_SUMMARY", start_equity=round(last_equity, 2),
                   end_equity=round(equity, 2), day_pnl=round(day_pnl, 2))
@@ -529,16 +586,20 @@ def main():
 
     # 2) Daily loss limit
     bot_pnl = bot_day_pnl(now)
+    SCAN["bot_pnl"] = round(bot_pnl, 2)
     print(f"Bot's own P&L today: {bot_pnl:+.2f} (limit -{MAX_DAILY_LOSS:g})")
     if bot_pnl <= -MAX_DAILY_LOSS:
+        SCAN["status"] = f"Daily loss limit hit ({bot_pnl:+.2f}): no new stock trades today"
         close_bot_positions(f"Daily loss limit hit (bot trades {bot_pnl:+.2f})", now)
         return
 
     # 3) Kill switch / strategy from the Sheet
     if settings is None:
         print("Settings tab unreachable: not opening new trades this run.")
+        SCAN["status"] = "Couldn't read the Sheet: no new trades this run"
         return
     if not settings["enabled"]:
+        SCAN["status"] = "Bot trading is off"
         close_bot_positions("Kill switch OFF", now)
         return
     if not PAPER and TRADING_STYLE == "aggressive":
@@ -554,10 +615,11 @@ def main():
     bot_recent = bot_symbols_recent(now)
     bot_open = {p["symbol"] for p in positions if p["symbol"] in bot_recent} | \
                {o["symbol"] for o in orders if is_bot_order(o)}
-    slots = min(MAX_OPEN_POSITIONS - len(bot_open), MAX_TRADES_PER_DAY - entries_today(now))
+    used = entries_today(now)
+    slots = min(MAX_OPEN_POSITIONS - len(bot_open), MAX_TRADES_PER_DAY - used)
+    SCAN.update(slots=max(0, slots), open=len(bot_open), max_open=MAX_OPEN_POSITIONS, used=used, max_trades=MAX_TRADES_PER_DAY)
     if slots <= 0:
-        print("No free slots (max positions or max trades per day reached).")
-        return
+        print("No free slots (max positions or max trades per day reached). Watching only.")
 
     # 5) Scan
     active = parse_strategies(settings["strategy"])
@@ -569,8 +631,9 @@ def main():
         watch = set()
     gainers = get_top_gainers() if "momentum" in active else []
     bars = get_today_bars(watch | set(gainers), now)
+    SCAN.update(scanned=len(watch | set(gainers)), gainers=len(gainers), strategies=active)
 
-    candidates, seen = [], set()
+    candidates, seen, near = [], set(), {}
     for name in active:
         if name == "momentum":
             # Aggressive: momentum also scans your bot watchlist, not just today's top gainers.
@@ -578,15 +641,24 @@ def main():
         else:
             symbols = sorted(watch)
         for sym in symbols:
-            if sym in busy or sym in seen or not bars.get(sym):
+            if sym in seen or not bars.get(sym):
                 continue
             sig = STRATEGIES[name](bars[sym], now)
-            if sig:
+            if sig and sym in busy:
+                SCAN["skips"].append({"symbol": sym, "strategy": name, "why": "already held (by you or the bot)"})
+                seen.add(sym)
+            elif sig:
                 candidates.append((name, sym, sig))
                 seen.add(sym)
+            elif sym not in busy:
+                nm = near_miss(name, bars[sym], now)
+                if nm and (sym not in near or nm[0] < near[sym]["pct"]):
+                    near[sym] = {"symbol": sym, "strategy": name, "pct": round(nm[0], 5), "text": nm[1]}
+    SCAN["near"] = [v for k, v in near.items() if k not in seen]
 
     if not candidates:
         print(f"No signals ({', '.join(active)}).")
+        SCAN["status"] = "All slots in use: watching only" if slots <= 0 else "Scanning: no setups right now"
         return
 
     # 6) Place bracket orders
@@ -594,21 +666,28 @@ def main():
     placed = 0
     for name, sym, sig in candidates:
         if placed >= slots:
-            break
-        order = build_order(sym, name, sig, buying_power, now)
+            SCAN["skips"].append({"symbol": sym, "strategy": name,
+                                  "why": f"signal, but no free slot ({len(bot_open) + placed}/{MAX_OPEN_POSITIONS} open, {used + placed}/{MAX_TRADES_PER_DAY} trades used)"})
+            continue
+        order, why = build_order(sym, name, sig, buying_power, now)
         if not order:
+            SCAN["skips"].append({"symbol": sym, "strategy": name, "why": why})
             continue
         try:
             res = alpaca("POST", "/v2/orders", json=order)
         except Exception as e:
             sheet_log("ERROR", message=f"Order failed for {sym}: {e}")
+            SCAN["skips"].append({"symbol": sym, "strategy": name, "why": f"Alpaca refused the order: {str(e)[:80]}"})
             continue
         placed += 1
+        SCAN["placed"].append({"symbol": sym, "strategy": name, "why": sig["why"]})
         buying_power -= float(order["qty"]) * float(order["limit_price"])
         sheet_log("ENTRY", strategy=name, symbol=sym, qty=int(order["qty"]),
                   entry=float(order["limit_price"]), stop=float(order["stop_loss"]["stop_price"]),
                   target=float(order["take_profit"]["limit_price"]), reason=sig["why"],
                   order_id=res.get("id", ""))
+    SCAN["status"] = (f"Placed {placed} order{'s' if placed != 1 else ''}" if placed
+                      else "Signals found, but all were skipped (see why)")
 
 
 if __name__ == "__main__":
@@ -617,4 +696,7 @@ if __name__ == "__main__":
     except Exception as e:
         traceback.print_exc()
         sheet_log("ERROR", message=str(e)[:500])
+        SCAN["status"] = "Error: " + str(e)[:120]
+        send_scan()
         sys.exit(1)
+    send_scan()
