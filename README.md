@@ -115,3 +115,31 @@ the crypto bot does the same. Only the latest scan + a 40-item rolling feed are 
 so the Sheet doesn't grow. If the stock bot hasn't run for 20+ minutes during market hours, Live shows a warning.
 Trading › Bot trading is now the review screen (today, scoreboard, finished trades, setups); open trades and
 today's moves live on the Live screen.
+
+## Reliable timer (cron-job.org, free) + signal memory
+GitHub's own timer is often 10-20 minutes late during market hours, so the bot kept arriving after breakouts.
+1. bot.py now has signal memory: it checks the last 3 bars and still takes a breakout from 5-10 minutes ago if the
+   price is within 0.3% of the signal price (no chasing). If the price ran away, Live shows it as skipped with the reason.
+2. cron-job.org starts the workflow exactly every 5 minutes, using a GitHub token that can only run this repo's workflows:
+   - GitHub › Settings › Developer settings › Personal access tokens › Fine-grained tokens › Generate new token.
+     Name: goldminebot-timer. Expiration: 1 year. Repository access: Only select repositories › AllMustGo/goldminebot.
+     Permissions › Repository › Actions: Read and write. Generate and copy the token (starts with github_pat_).
+   - cron-job.org (free account) › Create cronjob:
+     URL: https://api.github.com/repos/AllMustGo/goldminebot/actions/workflows/trade.yml/dispatches
+     Schedule: Custom › every 5 minutes, hours 9-15, Monday-Friday, time zone America/New_York.
+     Advanced › Request method: POST. Headers:
+       Accept: application/vnd.github+json
+       Authorization: Bearer github_pat_...  (your token)
+       X-GitHub-Api-Version: 2022-11-28
+     Request body: {"ref":"main","inputs":{"source":"timer"}}
+     Save, then "Test run": the answer should be 204 and a new run appears in GitHub › Actions.
+   GitHub's own schedule stays on as a backup; overlapping runs simply queue.
+
+## Crypto system (weather-based)
+Every 10 minutes from the Sheet. Bitcoin's daily + hourly trend sets the crypto weather:
+Uptrend → breakout (24-hour high, 12 in Aggressive) or pullback to the 20-hour average; Sideways → buy near the bottom
+of the 2-day range, sell near the top; Downtrend → wait in cash and sell open trades that aren't working.
+Exits: stop 1.5x the average hourly move; break-even at +1R; trailing stop after +2R (trend trades); time limit
+(Settings, default 48h). Protections: daily + weekly loss limits, 12-hour pause after 3 losses in a row, max 2 new
+coins per check. Fear & Greed index (alternative.me) shown on Live. Bot trade alerts default to phone push for each
+trade + one 8 PM summary email (Settings › Notifications); run setup() once to add the 8 PM trigger.
