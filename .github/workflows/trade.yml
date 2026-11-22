@@ -4,9 +4,16 @@ on:
   schedule:
     # Every 5 min on weekdays, covering market hours in both EST and EDT.
     # The bot checks Alpaca's market clock itself, so extra runs just exit.
+    # GitHub's timer is often late; cron-job.org also starts this workflow every 5 min
+    # (see README "Reliable timer"). These schedules stay as a backup.
     - cron: "30-55/5 13 * * 1-5"
     - cron: "*/5 14-20 * * 1-5"
   workflow_dispatch:
+    inputs:
+      source:
+        description: "Who started this run (manual = you, timer = cron-job.org)"
+        required: false
+        default: manual
 
 concurrency:
   group: goldminebot
@@ -29,6 +36,7 @@ jobs:
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           SHEET_WEBHOOK_URL: ${{ secrets.SHEET_WEBHOOK_URL }}
           SHEET_TOKEN: ${{ secrets.SHEET_TOKEN }}
+          BOT_SOURCE: ${{ inputs.source || 'schedule' }}
           PAPER: ${{ vars.PAPER }}
           STRATEGY: ${{ vars.STRATEGY }}
           WATCHLIST: ${{ vars.WATCHLIST }}
