@@ -334,6 +334,31 @@ def strat_momentum(bars, now):
 
 STRATEGIES = {"orb": strat_orb, "vwap": strat_vwap, "momentum": strat_momentum}
 
+# Signal memory: if a run starts late, a breakout may already be 1-2 bars old.
+# The bot still takes it, but only if the price hasn't run away (no chasing).
+LOOKBACK_BARS = 3          # newest bar + the 2 before it (covers a 15-minute late run)
+MAX_CHASE_PCT = 0.003      # skip if the price is now more than 0.3% above the signal price
+
+
+def find_signal(name, bars, now):
+    fn = STRATEGIES[name]
+    for k in range(LOOKBACK_BARS):
+        sub = bars[:len(bars) - k] if k else bars
+        if len(sub) < 2:
+            break
+        sig = fn(sub, now if k == 0 else sub[-1]["et"] + timedelta(minutes=5))
+        if not sig:
+            continue
+        if k == 0:
+            return sig
+        last = bars[-1]["c"]
+        entry = float(sig["entry"])
+        if last <= float(sig["stop"]) or last > entry * (1 + MAX_CHASE_PCT) or last < entry * (1 - MAX_CHASE_PCT):
+            return {"missed": True, "why": f"{sig['why']} {k * 5} min ago, but the price moved away "
+                                           f"(${entry:.2f} then, ${last:.2f} now)"}
+        return dict(sig, entry=last, why=f"{sig['why']} ({k * 5} min ago, price still close)")
+    return None
+
 
 # ---------------- Orders & risk ----------------
 BOT_PREFIXES = ("orb-", "vwap-", "momentum-")
@@ -551,7 +576,7 @@ def main():
     clock = alpaca("GET", "/v2/clock")
     if not clock.get("is_open"):
         print(f"[{MODE}] Market closed. Nothing to do.")
-        if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and os.environ.get("BOT_SOURCE", "manual") != "timer":
             health_check()
         return
 
@@ -643,7 +668,11 @@ def main():
         for sym in symbols:
             if sym in seen or not bars.get(sym):
                 continue
-            sig = STRATEGIES[name](bars[sym], now)
+            sig = find_signal(name, bars[sym], now)
+            if sig and sig.get("missed"):
+                SCAN["skips"].append({"symbol": sym, "strategy": name, "why": sig["why"]})
+                seen.add(sym)
+                continue
             if sig and sym in busy:
                 SCAN["skips"].append({"symbol": sym, "strategy": name, "why": "already held (by you or the bot)"})
                 seen.add(sym)
